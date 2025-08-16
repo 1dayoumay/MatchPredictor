@@ -32,7 +32,7 @@ def main():
     except requests.exceptions.RequestException as e:
         print(f"An error occurred during login request: {e}")
         return
-
+    return
     print("\n" + "="*20 + " Testing /api/leagues_teams " + "="*20)
     leagues_teams_url = f"{BASE_URL}/api/leagues_teams"
     params = {'country_name': COUNTRY_NAME}

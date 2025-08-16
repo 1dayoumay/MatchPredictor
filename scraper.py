@@ -2,6 +2,7 @@ import json, time, os, traceback
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import playwright
 from playwright.sync_api import sync_playwright
 
 class CornerStatsSession:
@@ -323,105 +324,201 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
             print(f"Error entering teams in compare form: {e}")
             return False
 
+        # Inside CornerStatsDataScraper class in scraper.py
     def _configure_filters(self, page, filters):
         """Configure the filter options based on API input (no user interaction)"""
         try:
             print("\nConfiguring filters...")
-            # Wait for filters to load
+            
+            # --- CRITICAL: Wait for the filter container to be visible ---
             filters_container = page.locator(".getmatches_filters")
-            filters_container.wait_for(timeout=10000)
+            filters_container.wait_for(timeout=15000, state='visible') # Wait up to 15s for visibility
+            print("Filters container is visible.")
+            # --- END CRITICAL ---
 
             # Set show results to maximum (100)
             show_select = page.locator("select.show_results")
             if show_select.count() > 0:
                 show_select.select_option("100")
                 print("Set results display to 100")
-                time.sleep(2)  # Wait for page to load
+                # Wait a bit for the change to potentially trigger updates
+                page.wait_for_timeout(2000) 
+
+            # --- Wait for filter elements to be attached to the DOM ---
+            # This is often enough before interacting, visibility can be flaky
+            page.locator('input[name="filter_tourn[]"]').first.wait_for(timeout=10000, state='attached')
+            page.locator('input[name="filter_season[]"]').first.wait_for(timeout=10000, state='attached')
+            page.locator('input[name="filter_home[]"]').first.wait_for(timeout=10000, state='attached')
+            print("Core filter elements are attached.")
+            # --- End Wait for attachment ---
 
             # 1. Tournament Type Filter
             tournament_choice = filters.get('tournament_type', 's').lower().strip()
             if tournament_choice in ['l', 'c', 'b']:
+                # Get locators for the specific checkboxes
+                league_checkbox = page.locator('input[name="filter_tourn[]"][value="1"]')
+                cups_checkbox = page.locator('input[name="filter_tourn[]"][value="2"]')
+                
+                # Small wait to ensure they are interactable
+                page.wait_for_timeout(1000) 
+
                 if tournament_choice == 'l':
-                    cups_checkbox = page.locator('input[name="filter_tourn[]"][value="2"]')
-                    if cups_checkbox.is_checked():
-                        cups_checkbox.uncheck()
+                    # Goal: League only -> Uncheck Cups
+                    # Check if Cups checkbox is currently checked *before* trying to uncheck
+                    # Use a short timeout for the check, as it might not be visible but still checkable
+                    try:
+                        if cups_checkbox.is_checked(timeout=2000): # Shorter timeout for check
+                            print("   Unchecking Cups...")
+                            cups_checkbox.uncheck()
+                        else:
+                            print("   Cups already unchecked.")
+                    except playwright._impl._errors.TimeoutError:
+                         # If checking state timed out, assume it's not checked or not interactable in a standard way
+                         # We might still try to uncheck it, or log a warning and proceed
+                         print("   Warning: Could not determine Cups checkbox state quickly, assuming unchecked or proceeding.")
                     print("   → Selected: League only")
+                    
                 elif tournament_choice == 'c':
-                    league_checkbox = page.locator('input[name="filter_tourn[]"][value="1"]')
-                    if league_checkbox.is_checked():
-                        league_checkbox.uncheck()
+                    # Goal: Cups only -> Uncheck League
+                    try:
+                        if league_checkbox.is_checked(timeout=2000):
+                            print("   Unchecking League...")
+                            league_checkbox.uncheck()
+                        else:
+                           print("   League already unchecked.")
+                    except playwright._impl._errors.TimeoutError:
+                         print("   Warning: Could not determine League checkbox state quickly, assuming unchecked or proceeding.")
                     print("   → Selected: Cups only")
+                    
                 elif tournament_choice == 'b':
+                    # Goal: Both League and Cups (usually default)
+                    # The original logic didn't explicitly check/uncheck both here,
+                    # implying they are checked by default or the default is acceptable.
+                    # We can leave them as is, or explicitly ensure they are checked.
+                    # Let's assume default is fine for 'b'.
                     print("   → Selected: Both League and Cups") # Both are checked by default usually
 
             # 2. Season Filter
             season_choice = filters.get('seasons', 'skip')
             if season_choice != 'skip':
-                season_checkboxes = page.locator('input[name="filter_season[]"]')
-                seasons_available = []
-                for i in range(season_checkboxes.count()):
-                    checkbox = season_checkboxes.nth(i)
-                    value = checkbox.get_attribute('value')
-                    label_span = checkbox.locator('xpath=following-sibling::span[@class="label-name"]')
-                    label = label_span.text_content().strip() if label_span.count() > 0 else f"Season {value}"
-                    seasons_available.append((value, label))
+                 # Small wait before interacting with season filters
+                 page.wait_for_timeout(1000)
+                 season_checkboxes = page.locator('input[name="filter_season[]"]')
+                 seasons_available = []
+                 # Extract season values and labels from the page
+                 for i in range(season_checkboxes.count()):
+                     checkbox = season_checkboxes.nth(i)
+                     value = checkbox.get_attribute('value')
+                     # Get the label text from the span element next to the checkbox
+                     label_span = checkbox.locator('xpath=following-sibling::span[@class="label-name"]')
+                     label = label_span.text_content().strip() if label_span.count() > 0 else f"Season {value}"
+                     seasons_available.append((value, label))
 
-                if season_choice == 'all':
-                    print("   → Selected: All seasons")
-                elif isinstance(season_choice, list) and season_choice:
-                    try:
-                        # First uncheck all seasons
-                        all_seasons_checkbox = page.locator('input.filter_quick_all_seasons')
-                        if all_seasons_checkbox.is_checked():
-                            all_seasons_checkbox.uncheck()
-                        # Uncheck all individual season checkboxes
-                        for season_value, _ in seasons_available:
-                            season_checkbox = page.locator(f'input[name="filter_season[]"][value="{season_value}"]')
-                            if season_checkbox.is_checked():
-                                season_checkbox.uncheck()
+                 if season_choice == 'all':
+                     print("   → Selected: All seasons")
+                     # If 'all' means keeping the default (often all are selected or a 'select all' is checked),
+                     # we might not need to do anything here, or ensure the 'all' checkbox is checked.
+                     # Let's assume default selection for 'all' is fine.
+                     
+                 elif isinstance(season_choice, list) and season_choice:
+                     try:
+                         # First uncheck all seasons
+                         all_seasons_checkbox = page.locator('input.filter_quick_all_seasons')
+                         # Check if 'select all' is checked and uncheck it if so
+                         try:
+                             if all_seasons_checkbox.is_checked(timeout=2000):
+                                 all_seasons_checkbox.uncheck()
+                                 print("   Unchecked 'Select All' seasons checkbox.")
+                         except playwright._impl._errors.TimeoutError:
+                              print("   Warning: Could not determine 'Select All' season checkbox state quickly.")
+                              
+                         # Uncheck all individual season checkboxes that might be checked
+                         # Small wait
+                         page.wait_for_timeout(500)
+                         for season_value, _ in seasons_available:
+                             season_checkbox = page.locator(f'input[name="filter_season[]"][value="{season_value}"]')
+                             try:
+                                 # Check state with a short timeout
+                                 if season_checkbox.is_checked(timeout=1500):
+                                     season_checkbox.uncheck()
+                                     # print(f"   Unchecked season {season_value}") # Optional verbose log
+                             except playwright._impl._errors.TimeoutError:
+                                  # If we can't check the state quickly, it might not be relevant or checkable right now
+                                  pass # Proceed
 
-                        # Check selected seasons
-                        selected_seasons = []
-                        for season_val_or_label in season_choice:
-                             # Match by value or label
-                             for s_val, s_label in seasons_available:
-                                 if str(season_val_or_label) == str(s_val) or str(season_val_or_label).lower() == s_label.lower():
-                                     season_checkbox = page.locator(f'input[name="filter_season[]"][value="{s_val}"]')
-                                     season_checkbox.check()
-                                     selected_seasons.append(s_label)
-                                     break
-                        if selected_seasons:
-                            print(f"   → Selected seasons: {', '.join(selected_seasons)}")
-                        else:
-                             print("   → No valid seasons matched for selection, keeping defaults.")
-                    except Exception as e:
-                        print(f"   → Error processing season selection list: {e}. Keeping defaults.")
+                         # Check selected seasons
+                         selected_seasons = []
+                         for season_val_or_label in season_choice:
+                              # Match by value or label
+                              for s_val, s_label in seasons_available:
+                                  if str(season_val_or_label) == str(s_val) or str(season_val_or_label).lower() == s_label.lower():
+                                      season_checkbox = page.locator(f'input[name="filter_season[]"][value="{s_val}"]')
+                                      # Add a tiny wait before checking
+                                      page.wait_for_timeout(200)
+                                      season_checkbox.check() # Check the desired ones
+                                      selected_seasons.append(s_label)
+                                      break
+                         if selected_seasons:
+                             print(f"   → Selected seasons: {', '.join(selected_seasons)}")
+                         else:
+                              print("   → No valid seasons matched for selection, keeping defaults (or none).")
+                     except Exception as e:
+                         print(f"   → Error processing season selection list: {e}. Keeping defaults.")
+                         import traceback
+                         traceback.print_exc()
 
             # 3. Venue Filter
             venue_choice = filters.get('venue', 's').lower().strip()
             if venue_choice in ['h', 'a', 'b']:
+                # Get locators for the specific checkboxes
+                home_checkbox = page.locator('input[name="filter_home[]"][value="1"]')
+                away_checkbox = page.locator('input[name="filter_home[]"][value="2"]')
+                
+                # Small wait to ensure they are interactable
+                page.wait_for_timeout(1000) 
+
                 if venue_choice == 'h':
-                    away_checkbox = page.locator('input[name="filter_home[]"][value="2"]')
-                    if away_checkbox.is_checked():
-                        away_checkbox.uncheck()
+                    # Goal: Home only -> Uncheck Away
+                    try:
+                        if away_checkbox.is_checked(timeout=2000):
+                            print("   Unchecking Away...")
+                            away_checkbox.uncheck()
+                        else:
+                           print("   Away already unchecked.")
+                    except playwright._impl._errors.TimeoutError:
+                         print("   Warning: Could not determine Away checkbox state quickly, assuming unchecked or proceeding.")
                     print("   → Selected: Home only")
+                    
                 elif venue_choice == 'a':
-                    home_checkbox = page.locator('input[name="filter_home[]"][value="1"]')
-                    if home_checkbox.is_checked():
-                        home_checkbox.uncheck()
+                    # Goal: Away only -> Uncheck Home
+                    try:
+                        if home_checkbox.is_checked(timeout=2000):
+                            print("   Unchecking Home...")
+                            home_checkbox.uncheck()
+                        else:
+                           print("   Home already unchecked.")
+                    except playwright._impl._errors.TimeoutError:
+                         print("   Warning: Could not determine Home checkbox state quickly, assuming unchecked or proceeding.")
                     print("   → Selected: Away only")
+                    
                 elif venue_choice == 'b':
+                    # Goal: Both Home and Away (usually default)
                     print("   → Selected: Both Home and Away") # Both are checked by default usually
 
-            # Wait for filters to apply
+            # Wait for filters to apply (might involve AJAX)
             print("\nApplying filters...")
-            time.sleep(3)
+            time.sleep(3) # Keep this for now, might need adjustment
             print("="*50)
             print("Filters configured successfully")
             return True
         except Exception as e:
             print(f"Error configuring filters: {e}")
+            # Print the full traceback for better debugging
+            import traceback
+            traceback.print_exc()
             return False
+        # Add import at the top of scraper.py if not already there
+        # import playwright._impl._errors 
 
     def _navigate_to_start_of_table(self, page):
         """Navigate to the start of the data table by clicking Previous until disabled"""

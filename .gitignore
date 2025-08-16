@@ -1,3 +1,4 @@
 tmp/
 rndm/
 session_data.json
+*.pyc
