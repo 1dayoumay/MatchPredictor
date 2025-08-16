@@ -193,28 +193,95 @@ def main_app():
 
                             # --- Step 4: Call Calculation API ---
                             st.header("4. Results")
-                            with st.spinner("Calculating win probability..."):
+                            with st.spinner("Calculating comprehensive match probabilities..."):
                                 result_data, status_code = make_api_request('POST', '/api/compare_and_calculate', data=payload)
 
                             if status_code == 200 and result_data:
                                 if result_data.get('success'):
-                                    st.subheader(f"Prediction Result")
-                                    st.metric(
-                                        label=f"Win Probability for {result_data['host_team']}",
-                                        value=f"{result_data['win_probability']:.2%}",
-                                        delta=f"Confidence: {result_data.get('confidence', 'N/A')}"
-                                    )
-                                    st.write(f"**Total Matches Analyzed:** {result_data.get('total_matches_analyzed', 'N/A')}")
+                                    st.subheader("Prediction Results")
+
+                                    # --- Display Main Outcome Probabilities (1X2) ---
+                                    st.markdown("**Match Outcome Probabilities (1X2):**")
+                                    col1, col2, col3 = st.columns(3)
+                                    with col1:
+                                        st.metric(
+                                            label=f"**{result_data['host_team']} Win**",
+                                            value=f"{result_data['probabilities']['host_win']:.2%}",
+                                            # delta=f"Odds: {result_data['odds']['host_win']:.2f}" # Optional odds in metric
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['host_win']:.2f}")
+                                    with col2:
+                                        st.metric(
+                                            label="**Draw**",
+                                            value=f"{result_data['probabilities']['draw']:.2%}",
+                                            # delta=f"Odds: {result_data['odds']['draw']:.2f}"
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['draw']:.2f}")
+                                    with col3:
+                                        st.metric(
+                                            label=f"**{result_data['guest_team']} Win**",
+                                            value=f"{result_data['probabilities']['guest_win']:.2%}",
+                                            # delta=f"Odds: {result_data['odds']['guest_win']:.2f}"
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['guest_win']:.2f}")
+                                    # --- End 1X2 Display ---
+
+                                    # --- Display Goal-Based Probabilities ---
+                                    st.markdown("**Goal-Based Probabilities:**")
+                                    col4, col5, col6, col7 = st.columns(4)
+                                    with col4:
+                                        st.metric(
+                                            label="**Over 1.5 Goals**",
+                                            value=f"{result_data['probabilities']['over_1_5']:.2%}",
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['over_1_5']:.2f}")
+                                    with col5:
+                                        st.metric(
+                                            label="**Over 2.5 Goals**",
+                                            value=f"{result_data['probabilities']['over_2_5']:.2%}",
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['over_2_5']:.2f}")
+                                    with col6:
+                                        st.metric(
+                                            label="**Over 3.5 Goals**",
+                                            value=f"{result_data['probabilities']['over_3_5']:.2%}",
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['over_3_5']:.2f}")
+                                    with col7:
+                                        st.metric(
+                                            label="**Both Teams Score (BTTS)**",
+                                            value=f"{result_data['probabilities']['btts']:.2%}",
+                                        )
+                                        st.caption(f"Odds: {result_data['odds']['btts']:.2f}")
+                                    # --- End Goal-Based Display ---
+
+                                    # --- Display Additional Info ---
+                                    st.markdown("---") # Separator
+                                    col8, col9 = st.columns(2)
+                                    with col8:
+                                        st.write(f"**Total Matches Analyzed:** {result_data.get('total_matches_analyzed', 'N/A')}")
+                                    with col9:
+                                        st.write(f"**Confidence:** {result_data.get('confidence', 'N/A'):.0%}")
                                     st.success(result_data.get('message', 'Calculation completed.'))
+                                    # --- End Additional Info ---
                                 else:
-                                    st.error(f"Calculation error: {result_data.get('error', 'Unknown error')}")
+                                    # Handle case where success=False (e.g., no data found)
+                                    st.warning(f"Calculation issue: {result_data.get('error', 'Calculation could not be completed.')}")
+                                    st.write(f"**Total Matches Analyzed:** {result_data.get('total_matches_analyzed', 'N/A')}")
                             elif status_code == 401:
                                 st.error("Session expired. Please log in again.")
                                 st.session_state['logged_in'] = False
                                 st.session_state['auth_token'] = None
                                 st.rerun()
+                            elif status_code == 404:
+                                 # Specific handling for 404 (No data found)
+                                 st.info("No historical match data was found for the selected teams and filters. Prediction cannot be calculated.")
+                                 # Optionally, still show the teams analyzed
+                                 if result_data and 'host_team' in result_data and 'guest_team' in result_data:
+                                     st.write(f"Teams: {result_data['host_team']} vs {result_data['guest_team']}")
                             else:
                                 st.error(f"Calculation failed (Status: {status_code}). Please try again.")
+                            # --- End of Step 4 ---
 
 def main():
     """Main Streamlit app logic."""

@@ -230,7 +230,7 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
             input_field.press("Backspace")
             time.sleep(3)  # Wait longer for search results to populate
 
-            # Wait for search results to appear
+            # Wait for search results container
             results_container = page.locator(results_container_selector)
             results_list = results_container.locator("li.match-creator-selectblock-searchresult-item")
 
@@ -253,14 +253,13 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
                 team_text = team_link.text_content().strip()
                 print(f"Selected team (first match): {team_text}")
                 team_link.click()
-                time.sleep(2)
+                time.sleep(2) # Wait after click
                 return True
 
         except Exception as e:
             print(f"Error selecting team from search results: {e}")
-            import traceback
             traceback.print_exc()
-            return False
+            return False # Return False on exception
 
     def _enter_teams_in_compare_form(self, page, host_team, guest_team, country_name):
         """Enter the selected teams in the Compare Teams form"""
@@ -464,7 +463,6 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
                               print("   → No valid seasons matched for selection, keeping defaults (or none).")
                      except Exception as e:
                          print(f"   → Error processing season selection list: {e}. Keeping defaults.")
-                         import traceback
                          traceback.print_exc()
 
             # 3. Venue Filter
@@ -514,7 +512,6 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
         except Exception as e:
             print(f"Error configuring filters: {e}")
             # Print the full traceback for better debugging
-            import traceback
             traceback.print_exc()
             return False
         # Add import at the top of scraper.py if not already there
@@ -641,77 +638,196 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
         return df
 
     def _calculate_win_probability(self, df):
-        """Calculate win probability for the host team using bookmaker odds with recency weighting"""
-        print("\nCalculating head-to-head win probabilities...")
+        """Calculate various match probabilities using bookmaker odds and simulation"""
+        print("\nCalculating comprehensive match probabilities...")
+        
+        # Handle empty or invalid data - Return an error message
         if df is None or df.empty:
-            print("No match data provided. Defaulting to 50% win probability.")
-            return 0.5
-
-        # Convert date to datetime and sort chronologically (oldest first)
+            print("No match data provided.")
+            # Return a specific indicator that no data was found
+            return {
+                "error": "No match data available for the selected teams and filters. Cannot calculate probabilities."
+            }
+        
+        # Convert date to datetime and sort chronologically
         df = df.copy()
         df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
-        df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True) # Drop rows with invalid dates
-
+        df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
+        
         if df.empty:
-             print("No valid match data with dates found. Defaulting to 50% win probability.")
-             return 0.5
-
+            print("No valid match data with dates found.")
+            return {
+                "error": "No valid historical match data found for the selected teams. Cannot calculate probabilities."
+            }
+        
         # Standardize perspective: Always treat Host as "Team A"
-        # Assume columns are Team1, Team2, Win (Host odds), Draw, Loss (Guest odds)
-        # Win column is odds for Team1 winning, Loss column is odds for Team2 winning
         df['host_win_odds'] = df['Win']
-        df['host_loss_odds'] = df['Loss']
+        df['guest_win_odds'] = df['Loss']
         df['draw_odds'] = df['Draw']
-
+        
         # Convert odds to numeric and filter valid matches
-        for col in ['host_win_odds', 'host_loss_odds', 'draw_odds']:
+        for col in ['host_win_odds', 'guest_win_odds', 'draw_odds']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-
+        
         valid = df[
             (df['host_win_odds'] > 0) &
-            (df['host_loss_odds'] > 0) &
+            (df['guest_win_odds'] > 0) &
             (df['draw_odds'] > 0)
         ].copy()
-
+        
         if valid.empty:
-            print("No valid odds data found. Defaulting to 50% win probability for Host.")
-            return 0.5
-
+            print("No valid odds data found.")
+            return {
+                "error": "Insufficient valid odds data found in the historical matches. Cannot calculate probabilities."
+            }
+        
         print(f"Analyzing {len(valid)} valid matches out of {len(df)} total matches")
-
+        
         # Calculate normalized probabilities (remove bookmaker margin)
-        valid['inv_win'] = 1 / valid['host_win_odds']
-        valid['inv_loss'] = 1 / valid['host_loss_odds']
+        valid['inv_host_win'] = 1 / valid['host_win_odds']
+        valid['inv_guest_win'] = 1 / valid['guest_win_odds']
         valid['inv_draw'] = 1 / valid['draw_odds']
-        valid['total_inv'] = valid['inv_win'] + valid['inv_loss'] + valid['inv_draw']
-        valid['p_host_win'] = valid['inv_win'] / valid['total_inv']
-        # valid['p_guest_win'] = valid['inv_loss'] / valid['total_inv'] # Not needed for return value
-        # valid['p_draw'] = valid['inv_draw'] / valid['total_inv'] # Not needed for return value
-
+        valid['total_inv'] = valid['inv_host_win'] + valid['inv_guest_win'] + valid['inv_draw']
+        
+        valid['p_host_win'] = valid['inv_host_win'] / valid['total_inv']
+        valid['p_guest_win'] = valid['inv_guest_win'] / valid['total_inv']
+        valid['p_draw'] = valid['inv_draw'] / valid['total_inv']
+        
         # Apply recency weighting (exponential decay)
         valid = valid.sort_values('Date', ascending=False)
-        valid['weight'] = np.exp(-0.15 * np.arange(len(valid)))  # λ=0.15 for slower decay
-
+        valid['weight'] = np.exp(-0.15 * np.arange(len(valid)))
+        
         # Calculate weighted probabilities
         total_weight = valid['weight'].sum()
         host_win_prob = (valid['p_host_win'] * valid['weight']).sum() / total_weight
-        # guest_win_prob = (valid['p_guest_win'] * valid['weight']).sum() / total_weight # Not needed
-        # draw_prob = (valid['p_draw'] * valid['weight']).sum() / total_weight # Not needed
-
-        # Calculate confidence metrics (simplified)
+        guest_win_prob = (valid['p_guest_win'] * valid['weight']).sum() / total_weight
+        draw_prob = (valid['p_draw'] * valid['weight']).sum() / total_weight
+        
+        # Normalize to ensure they sum to 1
+        total = host_win_prob + guest_win_prob + draw_prob
+        host_win_prob /= total
+        guest_win_prob /= total
+        draw_prob /= total
+        
+        # Calculate confidence metrics
         win_std = valid['p_host_win'].std()
-        confidence = max(0.3, 1 - win_std) if not pd.isna(win_std) else 0.5 # Minimum 30% confidence
+        confidence = max(0.3, 1 - win_std) if not pd.isna(win_std) else 0.5
+        
+        # Bayesian adjustment with prior
+        BAYESIAN_PRIOR = 1/3  # Neutral prior for 3 outcomes
+        adjusted_host_win = (host_win_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
+        adjusted_guest_win = (guest_win_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
+        adjusted_draw = (draw_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
+        
+        # Normalize again after Bayesian adjustment
+        total = adjusted_host_win + adjusted_guest_win + adjusted_draw
+        adjusted_host_win /= total
+        adjusted_guest_win /= total
+        adjusted_draw /= total
+        
+        # --- Run Monte Carlo simulation for goal probabilities ---
+        num_simulations = 10000
+        
+        # Estimate average goals scored/conceded from valid data for simulation
+        # This uses the implied probabilities to estimate goal expectations
+        # A more sophisticated approach would use actual goal data if available
+        
+        # Simple heuristic to estimate goal expectations based on outcome probabilities
+        # Higher win probability suggests higher expected goals for that team
+        total_prob = adjusted_host_win + adjusted_draw + adjusted_guest_win
+        if total_prob > 0:
+            # Normalize probabilities for goal estimation
+            norm_host_win = adjusted_host_win / total_prob
+            norm_draw = adjusted_draw / total_prob
+            norm_guest_win = adjusted_guest_win / total_prob
+            
+            # Estimate goal expectations based on outcome probabilities
+            # These are rough estimates, could be refined with more domain knowledge or data
+            expected_goals_home = 1.2 + (norm_host_win * 1.0) + (norm_draw * 0.3) # Base + Win bonus + Draw component
+            expected_goals_away = 1.0 + (norm_guest_win * 1.0) + (norm_draw * 0.3)
+            
+            # Ensure a minimum expectation
+            expected_goals_home = max(expected_goals_home, 0.5)
+            expected_goals_away = max(expected_goals_away, 0.5)
+        else:
+            # Fallback if probabilities are somehow invalid
+            expected_goals_home = 1.2
+            expected_goals_away = 1.0
 
-        # Bayesian adjustment with prior (simplified)
-        BAYESIAN_PRIOR = 0.5  # Neutral prior
-        adjusted_host_prob = (host_win_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
+        # Run simulation
+        over_15 = 0
+        over_25 = 0
+        over_35 = 0
+        btts = 0
+        
+        for _ in range(num_simulations):
+            # Determine match outcome based on adjusted probabilities
+            rand = np.random.random()
+            if rand < adjusted_host_win:
+                # Home win scenario - higher home goals likely
+                home_goals = np.random.poisson(expected_goals_home * 1.1) # Slightly boost home team
+                away_goals = np.random.poisson(expected_goals_away * 0.9) # Slightly reduce away team
+            elif rand < adjusted_host_win + adjusted_draw:
+                # Draw scenario - more balanced goals
+                home_goals = np.random.poisson(expected_goals_home)
+                away_goals = np.random.poisson(expected_goals_away)
+            else:
+                # Away win scenario - higher away goals likely
+                home_goals = np.random.poisson(expected_goals_home * 0.9) # Slightly reduce home team
+                away_goals = np.random.poisson(expected_goals_away * 1.1) # Slightly boost away team
+            
+            # Calculate goal-based probabilities
+            total_goals = home_goals + away_goals
+            if total_goals > 1.5:
+                over_15 += 1
+            if total_goals > 2.5:
+                over_25 += 1
+            if total_goals > 3.5:
+                over_35 += 1
+            if home_goals > 0 and away_goals > 0:
+                btts += 1
 
-        # Print results (optional for API, but good for logs)
-        print(f"\n{'='*50}")
-        print(f"Host Team Win Probability: {adjusted_host_prob:.2%} (Confidence: {confidence:.0%})")
-        print(f"{'='*50}")
-
-        return adjusted_host_prob # Return Host win probability
+        # Calculate probabilities from simulation
+        over_15_prob = over_15 / num_simulations
+        over_25_prob = over_25 / num_simulations
+        over_35_prob = over_35 / num_simulations
+        btts_prob = btts / num_simulations
+        
+        # Calculate odds
+        def probability_to_odds(prob):
+            return round(1 / prob, 2) if prob > 0 else float('inf')
+        
+        # Format the results
+        result = {
+            'host_win_prob': round(adjusted_host_win, 4),
+            'draw_prob': round(adjusted_draw, 4),
+            'guest_win_prob': round(adjusted_guest_win, 4),
+            'over_15_prob': round(over_15_prob, 4),
+            'over_25_prob': round(over_25_prob, 4),
+            'over_35_prob': round(over_35_prob, 4),
+            'btts_prob': round(btts_prob, 4),
+            'host_win_odds': probability_to_odds(adjusted_host_win),
+            'draw_odds': probability_to_odds(adjusted_draw),
+            'guest_win_odds': probability_to_odds(adjusted_guest_win),
+            'over_15_odds': probability_to_odds(over_15_prob),
+            'over_25_odds': probability_to_odds(over_25_prob),
+            'over_35_odds': probability_to_odds(over_35_prob),
+            'btts_odds': probability_to_odds(btts_prob),
+            'confidence': round(confidence, 2),
+            'total_matches': len(valid) # Include number of matches for context
+        }
+        
+        # Print comprehensive results (optional for API, good for logs/development)
+        # print(f"\n{'='*60}")
+        # print(f"1X2 Probabilities:")
+        # print(f"Host Win: {result['host_win_prob']:.2%} | Draw: {result['draw_prob']:.2%} | Guest Win: {result['guest_win_prob']:.2%}")
+        # print(f"\nOver/Under Probabilities:")
+        # print(f"Over 1.5: {result['over_15_prob']:.2%} | Over 2.5: {result['over_25_prob']:.2%} | Over 3.5: {result['over_35_prob']:.2%}")
+        # print(f"\nBoth Teams to Score: {result['btts_prob']:.2%}")
+        # print(f"\nConfidence: {confidence:.0%} (based on {len(valid)} matches)")
+        # print(f"{'='*60}")
+        
+        return result
 
 
     def compare_and_calculate(self, host_team, guest_team, country_name, filters):
@@ -759,22 +875,50 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
                     return {"error": "Failed to create DataFrame from scraped data"}, 500
 
                 # Calculate win probability
-                win_probability = self._calculate_win_probability(df)
+                probabilities_result = self._calculate_win_probability(df)
 
-                # Return successful result
+                # Check if probabilities calculation returned an error
+                if "error" in probabilities_result:
+                    # Return the error message to the API client
+                    return {
+                        "success": False,
+                        "host_team": host_team['name'],
+                        "guest_team": guest_team['name'],
+                        "error": probabilities_result["error"],
+                        "total_matches_analyzed": len(df) if df is not None else 0,
+                    }, 404 # Using 404 Not Found to indicate no data, or 200 OK with success=False
+
+                # If successful, probabilities_result contains the data
+                # Return successful result with all metrics
                 return {
                     "success": True,
                     "host_team": host_team['name'],
                     "guest_team": guest_team['name'],
-                    "win_probability": round(win_probability, 4), # Round for cleaner output
-                    "confidence": "High" if win_probability > 0.6 or win_probability < 0.4 else "Medium" if 0.45 <= win_probability <= 0.55 else "Low",
-                    "total_matches_analyzed": len(df),
+                    "probabilities": {
+                        "host_win": probabilities_result['host_win_prob'],
+                        "draw": probabilities_result['draw_prob'],
+                        "guest_win": probabilities_result['guest_win_prob'],
+                        "over_1_5": probabilities_result['over_15_prob'],
+                        "over_2_5": probabilities_result['over_25_prob'],
+                        "over_3_5": probabilities_result['over_35_prob'],
+                        "btts": probabilities_result['btts_prob']
+                    },
+                    "odds": {
+                        "host_win": probabilities_result['host_win_odds'],
+                        "draw": probabilities_result['draw_odds'],
+                        "guest_win": probabilities_result['guest_win_odds'],
+                        "over_1_5": probabilities_result['over_15_odds'],
+                        "over_2_5": probabilities_result['over_25_odds'],
+                        "over_3_5": probabilities_result['over_35_odds'],
+                        "btts": probabilities_result['btts_odds']
+                    },
+                    "confidence": probabilities_result['confidence'],
+                    "total_matches_analyzed": probabilities_result['total_matches'],
                     "message": "Calculation completed successfully."
                 }, 200
 
             except Exception as e:
                 print(f"Error in compare_and_calculate: {e}")
-                import traceback
                 traceback.print_exc() # Log the full traceback
                 return {"error": f"Scraping/calculation failed: {str(e)}"}, 500
             finally:
