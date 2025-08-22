@@ -640,7 +640,7 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
     def _calculate_win_probability(self, df):
         """Calculate various match probabilities using bookmaker odds and simulation"""
         print("\nCalculating comprehensive match probabilities...")
-        
+
         # Handle empty or invalid data - Return an error message
         if df is None or df.empty:
             print("No match data provided.")
@@ -648,104 +648,101 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
             return {
                 "error": "No match data available for the selected teams and filters. Cannot calculate probabilities."
             }
-        
+
         # Convert date to datetime and sort chronologically
         df = df.copy()
-        df['Date'] = pd.to_datetime(df['Date'], dayfirst=True, errors='coerce')
+        df['Date'] = pd.to_datetime(df['Date'], format='%d/%m/%Y', errors='coerce')
         df = df.dropna(subset=['Date']).sort_values('Date').reset_index(drop=True)
-        
+
         if df.empty:
             print("No valid match data with dates found.")
             return {
                 "error": "No valid historical match data found for the selected teams. Cannot calculate probabilities."
             }
-        
+
         # Standardize perspective: Always treat Host as "Team A"
         df['host_win_odds'] = df['Win']
         df['guest_win_odds'] = df['Loss']
         df['draw_odds'] = df['Draw']
-        
+
         # Convert odds to numeric and filter valid matches
         for col in ['host_win_odds', 'guest_win_odds', 'draw_odds']:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        
+
         valid = df[
             (df['host_win_odds'] > 0) &
             (df['guest_win_odds'] > 0) &
             (df['draw_odds'] > 0)
         ].copy()
-        
+
         if valid.empty:
             print("No valid odds data found.")
             return {
                 "error": "Insufficient valid odds data found in the historical matches. Cannot calculate probabilities."
             }
-        
+
         print(f"Analyzing {len(valid)} valid matches out of {len(df)} total matches")
-        
+
         # Calculate normalized probabilities (remove bookmaker margin)
         valid['inv_host_win'] = 1 / valid['host_win_odds']
         valid['inv_guest_win'] = 1 / valid['guest_win_odds']
         valid['inv_draw'] = 1 / valid['draw_odds']
         valid['total_inv'] = valid['inv_host_win'] + valid['inv_guest_win'] + valid['inv_draw']
-        
+
         valid['p_host_win'] = valid['inv_host_win'] / valid['total_inv']
         valid['p_guest_win'] = valid['inv_guest_win'] / valid['total_inv']
         valid['p_draw'] = valid['inv_draw'] / valid['total_inv']
-        
+
         # Apply recency weighting (exponential decay)
         valid = valid.sort_values('Date', ascending=False)
         valid['weight'] = np.exp(-0.15 * np.arange(len(valid)))
-        
+
         # Calculate weighted probabilities
         total_weight = valid['weight'].sum()
         host_win_prob = (valid['p_host_win'] * valid['weight']).sum() / total_weight
         guest_win_prob = (valid['p_guest_win'] * valid['weight']).sum() / total_weight
         draw_prob = (valid['p_draw'] * valid['weight']).sum() / total_weight
-        
+
         # Normalize to ensure they sum to 1
         total = host_win_prob + guest_win_prob + draw_prob
         host_win_prob /= total
         guest_win_prob /= total
         draw_prob /= total
-        
+
         # Calculate confidence metrics
         win_std = valid['p_host_win'].std()
         confidence = max(0.3, 1 - win_std) if not pd.isna(win_std) else 0.5
-        
+
         # Bayesian adjustment with prior
         BAYESIAN_PRIOR = 1/3  # Neutral prior for 3 outcomes
         adjusted_host_win = (host_win_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
         adjusted_guest_win = (guest_win_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
         adjusted_draw = (draw_prob * confidence) + (BAYESIAN_PRIOR * (1 - confidence))
-        
+
         # Normalize again after Bayesian adjustment
         total = adjusted_host_win + adjusted_guest_win + adjusted_draw
         adjusted_host_win /= total
         adjusted_guest_win /= total
         adjusted_draw /= total
-        
+
         # --- Run Monte Carlo simulation for goal probabilities ---
         num_simulations = 10000
-        
+
         # Estimate average goals scored/conceded from valid data for simulation
         # This uses the implied probabilities to estimate goal expectations
-        # A more sophisticated approach would use actual goal data if available
-        
+
         # Simple heuristic to estimate goal expectations based on outcome probabilities
-        # Higher win probability suggests higher expected goals for that team
         total_prob = adjusted_host_win + adjusted_draw + adjusted_guest_win
         if total_prob > 0:
             # Normalize probabilities for goal estimation
             norm_host_win = adjusted_host_win / total_prob
             norm_draw = adjusted_draw / total_prob
             norm_guest_win = adjusted_guest_win / total_prob
-            
+
             # Estimate goal expectations based on outcome probabilities
-            # These are rough estimates, could be refined with more domain knowledge or data
-            expected_goals_home = 1.2 + (norm_host_win * 1.0) + (norm_draw * 0.3) # Base + Win bonus + Draw component
+            expected_goals_home = 1.2 + (norm_host_win * 1.0) + (norm_draw * 0.3)
             expected_goals_away = 1.0 + (norm_guest_win * 1.0) + (norm_draw * 0.3)
-            
+
             # Ensure a minimum expectation
             expected_goals_home = max(expected_goals_home, 0.5)
             expected_goals_away = max(expected_goals_away, 0.5)
@@ -759,23 +756,23 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
         over_25 = 0
         over_35 = 0
         btts = 0
-        
+
         for _ in range(num_simulations):
             # Determine match outcome based on adjusted probabilities
             rand = np.random.random()
             if rand < adjusted_host_win:
                 # Home win scenario - higher home goals likely
-                home_goals = np.random.poisson(expected_goals_home * 1.1) # Slightly boost home team
-                away_goals = np.random.poisson(expected_goals_away * 0.9) # Slightly reduce away team
+                home_goals = np.random.poisson(expected_goals_home * 1.1)
+                away_goals = np.random.poisson(expected_goals_away * 0.9)
             elif rand < adjusted_host_win + adjusted_draw:
                 # Draw scenario - more balanced goals
                 home_goals = np.random.poisson(expected_goals_home)
                 away_goals = np.random.poisson(expected_goals_away)
             else:
                 # Away win scenario - higher away goals likely
-                home_goals = np.random.poisson(expected_goals_home * 0.9) # Slightly reduce home team
-                away_goals = np.random.poisson(expected_goals_away * 1.1) # Slightly boost away team
-            
+                home_goals = np.random.poisson(expected_goals_home * 0.9)
+                away_goals = np.random.poisson(expected_goals_away * 1.1)
+
             # Calculate goal-based probabilities
             total_goals = home_goals + away_goals
             if total_goals > 1.5:
@@ -792,11 +789,42 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
         over_25_prob = over_25 / num_simulations
         over_35_prob = over_35 / num_simulations
         btts_prob = btts / num_simulations
-        
-        # Calculate odds
+
+        # --- Calculate Asian Handicap Probabilities ---
+        # AH -0.25 (Home) = 50% of AH 0.0 (Home) + 50% of AH -0.5 (Home)
+        # AH -0.25 (Away) = 50% of AH 0.0 (Away) + 50% of AH -0.5 (Away)
+
+        # AH 0.0 (Home) wins if Home Win or Draw
+        ah_0_0_home_prob = adjusted_host_win + adjusted_draw
+        # AH 0.0 (Away) wins if Away Win
+        ah_0_0_away_prob = adjusted_guest_win
+
+        # AH -0.5 (Home) wins if Home Win
+        ah_m0_5_home_prob = adjusted_host_win
+        # AH -0.5 (Away) wins if Away Win or Draw
+        ah_m0_5_away_prob = adjusted_guest_win + adjusted_draw
+
+        # AH -0.25 (Home) = Average of AH 0.0 (Home) and AH -0.5 (Home)
+        ah_m0_25_home_prob = (ah_0_0_home_prob + ah_m0_5_home_prob) / 2.0
+        # AH -0.25 (Away) = Average of AH 0.0 (Away) and AH -0.5 (Away)
+        ah_m0_25_away_prob = (ah_0_0_away_prob + ah_m0_5_away_prob) / 2.0
+
+        # --- Add Asian Handicap -2.5 Calculations ---
+        # AH -2.5 (Home) wins if Home Win
+        ah_m2_5_home_prob = adjusted_host_win
+        # AH -2.5 (Away) wins if Away Win or Draw
+        ah_m2_5_away_prob = adjusted_guest_win + adjusted_draw
+        # --- End Asian Handicap -2.5 Calculations ---
+
+        # --- Calculate Asian Handicap Odds ---
         def probability_to_odds(prob):
             return round(1 / prob, 2) if prob > 0 else float('inf')
-        
+
+        # --- Format the results ---
+        # Ensure ah_m2_5_* variables are defined before this point
+        ah_m2_5_home_odds = probability_to_odds(ah_m2_5_home_prob)
+        ah_m2_5_away_odds = probability_to_odds(ah_m2_5_away_prob)
+
         # Format the results
         result = {
             'host_win_prob': round(adjusted_host_win, 4),
@@ -813,9 +841,22 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
             'over_25_odds': probability_to_odds(over_25_prob),
             'over_35_odds': probability_to_odds(over_35_prob),
             'btts_odds': probability_to_odds(btts_prob),
+            # --- Asian Handicap Results ---
+            # AH -0.25
+            'ah_m0_25_home_prob': round(ah_m0_25_home_prob, 4),
+            'ah_m0_25_away_prob': round(ah_m0_25_away_prob, 4),
+            'ah_m0_25_home_odds': probability_to_odds(ah_m0_25_home_prob),
+            'ah_m0_25_away_odds': probability_to_odds(ah_m0_25_away_prob),
+            # AH -2.5
+            'ah_m2_5_home_prob': round(ah_m2_5_home_prob, 4),
+            'ah_m2_5_away_prob': round(ah_m2_5_away_prob, 4),
+            'ah_m2_5_home_odds': ah_m2_5_home_odds, # Use pre-calculated odds
+            'ah_m2_5_away_odds': ah_m2_5_away_odds, # Use pre-calculated odds
+            # --- End Asian Handicap ---
             'confidence': round(confidence, 2),
             'total_matches': len(valid) # Include number of matches for context
         }
+        # --- End Format the results ---
         
         # Print comprehensive results (optional for API, good for logs/development)
         # print(f"\n{'='*60}")
@@ -828,7 +869,6 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
         # print(f"{'='*60}")
         
         return result
-
 
     def compare_and_calculate(self, host_team, guest_team, country_name, filters):
         """API-facing method to perform comparison and calculation"""
@@ -890,32 +930,48 @@ class CornerStatsDataScraper: # Renamed to DataScraper for clarity, inheriting s
 
                 # If successful, probabilities_result contains the data
                 # Return successful result with all metrics
+                # Inside the compare_and_calculate method in scraper.py, within the successful result return block
                 return {
                     "success": True,
                     "host_team": host_team['name'],
                     "guest_team": guest_team['name'],
                     "probabilities": {
-                        "host_win": probabilities_result['host_win_prob'],
-                        "draw": probabilities_result['draw_prob'],
-                        "guest_win": probabilities_result['guest_win_prob'],
-                        "over_1_5": probabilities_result['over_15_prob'],
-                        "over_2_5": probabilities_result['over_25_prob'],
-                        "over_3_5": probabilities_result['over_35_prob'],
-                        "btts": probabilities_result['btts_prob']
+                        "host_win": probabilities_result.get('host_win_prob', 0),
+                        "draw": probabilities_result.get('draw_prob', 0),
+                        "guest_win": probabilities_result.get('guest_win_prob', 0),
+                        "over_1_5": probabilities_result.get('over_15_prob', 0),
+                        "over_2_5": probabilities_result.get('over_25_prob', 0),
+                        "over_3_5": probabilities_result.get('over_35_prob', 0),
+                        "btts": probabilities_result.get('btts_prob', 0),
+                        # --- Asian Handicap Probabilities ---
+                        "ah_m0_25_home_prob": probabilities_result.get('ah_m0_25_home_prob', 0),
+                        "ah_m0_25_away_prob": probabilities_result.get('ah_m0_25_away_prob', 0),
+                        # Add AH -2.5 probabilities
+                        "ah_m2_5_home_prob": probabilities_result.get('ah_m2_5_home_prob', 0),
+                        "ah_m2_5_away_prob": probabilities_result.get('ah_m2_5_away_prob', 0)
+                        # --- End Asian Handicap Probabilities ---
                     },
                     "odds": {
-                        "host_win": probabilities_result['host_win_odds'],
-                        "draw": probabilities_result['draw_odds'],
-                        "guest_win": probabilities_result['guest_win_odds'],
-                        "over_1_5": probabilities_result['over_15_odds'],
-                        "over_2_5": probabilities_result['over_25_odds'],
-                        "over_3_5": probabilities_result['over_35_odds'],
-                        "btts": probabilities_result['btts_odds']
+                        "host_win": probabilities_result.get('host_win_odds', float('inf')),
+                        "draw": probabilities_result.get('draw_odds', float('inf')),
+                        "guest_win": probabilities_result.get('guest_win_odds', float('inf')),
+                        "over_1_5": probabilities_result.get('over_15_odds', float('inf')),
+                        "over_2_5": probabilities_result.get('over_25_odds', float('inf')),
+                        "over_3_5": probabilities_result.get('over_35_odds', float('inf')),
+                        "btts": probabilities_result.get('btts_odds', float('inf')),
+                        # --- Asian Handicap Odds ---
+                        "ah_m0_25_home_odds": probabilities_result.get('ah_m0_25_home_odds', float('inf')),
+                        "ah_m0_25_away_odds": probabilities_result.get('ah_m0_25_away_odds', float('inf')),
+                        # Add AH -2.5 odds
+                        "ah_m2_5_home_odds": probabilities_result.get('ah_m2_5_home_odds', float('inf')),
+                        "ah_m2_5_away_odds": probabilities_result.get('ah_m2_5_away_odds', float('inf'))
+                        # --- End Asian Handicap Odds ---
                     },
-                    "confidence": probabilities_result['confidence'],
-                    "total_matches_analyzed": probabilities_result['total_matches'],
+                    "confidence": probabilities_result.get('confidence', 0),
+                    "total_matches_analyzed": probabilities_result.get('total_matches', len(df)),
                     "message": "Calculation completed successfully."
                 }, 200
+                # --- End Construct Response ---
 
             except Exception as e:
                 print(f"Error in compare_and_calculate: {e}")
